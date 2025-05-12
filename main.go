@@ -24,12 +24,14 @@ var (
 	pid       = flag.Int("pid", 0, "Monitor only traffic related to this PID")
 	duration  = flag.Int("duration", 10, "Capture duration in seconds")
 	logFile   = flag.String("logfile", "", "Log captured packets to a file")
+	protocol  = flag.String("protocol", "all", "Capture only this protocol: tcp, udp, or all (default: all)")
+	port      = flag.Int("port", 0, "Capture only packets from this port (0 for all ports)")
 )
 
 type connKey struct {
-	localIP   string
-	localPort string
-	remoteIP  string
+	localIP    string
+	localPort  string
+	remoteIP   string
 	remotePort string
 }
 
@@ -111,14 +113,28 @@ func traceTraffic(iface string, duration time.Duration, pidConns map[string]stru
 			srcIP, dstIP := network.NetworkFlow().Endpoints()
 			srcPort, dstPort := "", ""
 
+			// Filter by protocol (TCP/UDP)
 			switch layer := transport.(type) {
 			case *layers.TCP:
+				if *protocol != "all" && *protocol != "tcp" {
+					continue
+				}
 				srcPort = fmt.Sprint(layer.SrcPort)
 				dstPort = fmt.Sprint(layer.DstPort)
 			case *layers.UDP:
+				if *protocol != "all" && *protocol != "udp" {
+					continue
+				}
 				srcPort = fmt.Sprint(layer.SrcPort)
 				dstPort = fmt.Sprint(layer.DstPort)
 			default:
+				continue
+			}
+
+			// Filter by port
+			filterPort := fmt.Sprintf("%d", *port)
+			if filterPort != "" && (filterPort != srcPort && filterPort != dstPort &&
+				filterPort != srcPort && filterPort != dstPort) {
 				continue
 			}
 
@@ -203,4 +219,3 @@ func hexToPort(hexPort string) string {
 	p, _ := strconv.ParseInt(hexPort, 16, 32)
 	return strconv.Itoa(int(p))
 }
-
