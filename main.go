@@ -7,7 +7,9 @@ import (
 	"fmt"
 	"log"
 	"os"
+	"os/exec"
 	"path/filepath"
+	"runtime"
 	"strconv"
 	"strings"
 	"time"
@@ -19,7 +21,7 @@ import (
 
 var (
 	iface     = flag.String("iface", "eth0", "Interface to capture on")
-	showStats = flag.Bool("stats", true, "Show basic stats from /proc/net/dev")
+	showStats = flag.Bool("stats", true, "Show basic stats from the interface")
 	trace     = flag.Bool("trace", false, "Enable packet capture")
 	pid       = flag.Int("pid", 0, "Monitor only traffic related to this PID")
 	duration  = flag.Int("duration", 10, "Capture duration in seconds")
@@ -27,13 +29,6 @@ var (
 	protocol  = flag.String("protocol", "all", "Capture only this protocol: tcp, udp, or all (default: all)")
 	port      = flag.Int("port", 0, "Capture only packets from this port (0 for all ports)")
 )
-
-type connKey struct {
-	localIP    string
-	localPort  string
-	remoteIP   string
-	remotePort string
-}
 
 func main() {
 	flag.Parse()
@@ -69,6 +64,17 @@ func main() {
 }
 
 func printNetworkStats() {
+	if runtime.GOOS == "linux" {
+		printLinuxNetworkStats()
+	} else if runtime.GOOS == "darwin" {
+		printMacNetworkStats()
+	} else {
+		log.Fatalf("Unsupported OS: %s", runtime.GOOS)
+	}
+}
+
+// Linux version of network stats
+func printLinuxNetworkStats() {
 	data, err := os.ReadFile("/proc/net/dev")
 	if err != nil {
 		log.Fatalf("Failed to read /proc/net/dev: %v", err)
@@ -84,6 +90,18 @@ func printNetworkStats() {
 			}
 		}
 	}
+}
+
+// macOS version of network stats
+func printMacNetworkStats() {
+	cmd := exec.Command("netstat", "-i")
+	output, err := cmd.CombinedOutput()
+	if err != nil {
+		log.Fatalf("Failed to execute netstat: %v", err)
+	}
+
+	fmt.Println("Interface Stats:")
+	fmt.Println(string(output))
 }
 
 func traceTraffic(iface string, duration time.Duration, pidConns map[string]struct{}, logWriter *os.File) {
@@ -159,6 +177,17 @@ func traceTraffic(iface string, duration time.Duration, pidConns map[string]stru
 }
 
 func getPidConnections(pid int) (map[string]struct{}, error) {
+	if runtime.GOOS == "linux" {
+		return getLinuxPidConnections(pid)
+	} else if runtime.GOOS == "darwin" {
+		return getMacPidConnections(pid)
+	} else {
+		return nil, fmt.Errorf("Unsupported OS: %s", runtime.GOOS)
+	}
+}
+
+// Linux version for getting PID connections
+func getLinuxPidConnections(pid int) (map[string]struct{}, error) {
 	conns := make(map[string]struct{})
 	fdDir := fmt.Sprintf("/proc/%d/fd", pid)
 
@@ -180,6 +209,36 @@ func getPidConnections(pid int) (map[string]struct{}, error) {
 	// Check TCP
 	parseProcNet("/proc/net/tcp", inodes, conns)
 	parseProcNet("/proc/net/udp", inodes, conns)
+	return conns, nil
+}
+
+// macOS version for getting PID connections using lsof
+func getMacPidConnections(pid int) (map[string]struct{}, error) {
+	conns := make(map[string]struct{})
+	cmd := exec.Command("lsof", "-i", "-a", "-p", fmt.Sprint(pid))
+	output, err := cmd.CombinedOutput()
+	if err != nil {
+		return nil, fmt.Errorf("lsof command failed: %w", err)
+	}
+
+	// Parse lsof output for socket connections
+	lines := strings.Split(string(output), "\n")
+	for _, line := range lines {
+		if strings.Contains(line, "TCP") || strings.Contains(line, "UDP") {
+			parts := strings.Fields(line)
+			if len(parts) > 8 {
+				srcDst := parts[8] // Format: IP:Port->IP:Port
+				parts := strings.Split(srcDst, "->")
+				if len(parts) == 2 {
+					local := parts[0]
+					remote := parts[1]
+					conns[fmt.Sprintf("%s", local)] = struct{}{}
+					conns[fmt.Sprintf("%s", remote)] = struct{}{}
+				}
+			}
+		}
+	}
+
 	return conns, nil
 }
 
